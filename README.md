@@ -64,6 +64,10 @@ of more computation, resulting in slower responses.
 
 ![GUI screenshot](images/gui.png)
 
+Note: I accidentally discovered that placing this wall as the first move often encourages the AI agent to play more actively.
+If the model gets stuck in a cycle, try exploring different board positions and give it a few more chances—it's still 
+far from being even an average-level model.
+
 
 ### References
 This repo is based on two other repos:
