@@ -1,57 +1,67 @@
 import sys
 sys.path.append('..')
-from utils import *
 
-import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
-from torchvision import datasets, transforms
-from torch.autograd import Variable
+
+
+class ResidualBlock(nn.Module):
+    def __init__(self, num_channels):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = nn.Conv2d(num_channels, num_channels, kernel_size=3, stride=1, padding=1)
+        self.bn1 = nn.BatchNorm2d(num_channels)
+        self.conv2 = nn.Conv2d(num_channels, num_channels, kernel_size=3, stride=1, padding=1)
+        self.bn2 = nn.BatchNorm2d(num_channels)
+
+    def forward(self, x):
+        residual = x
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += residual
+        out = F.relu(out)
+        return out
+
 
 class QuoridorNNet(nn.Module):
     def __init__(self, game, args):
-        # game params
+        super(QuoridorNNet, self).__init__()
         self.board_x, self.board_y = game.getBoardSize()
         self.action_size = game.getActionSize()
         self.args = args
 
-        super(QuoridorNNet, self).__init__()
-        self.conv1 = nn.Conv2d(4, args.num_channels, 3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(args.num_channels, args.num_channels, 3, stride=1, padding=1)
-        self.conv3 = nn.Conv2d(args.num_channels, args.num_channels, 3, stride=1)
-        self.conv4 = nn.Conv2d(args.num_channels, args.num_channels, 3, stride=1)
+        self.conv_in = nn.Conv2d(4, args.num_channels, kernel_size=3, stride=1, padding=1)
+        self.bn_in = nn.BatchNorm2d(args.num_channels)
 
-        self.bn1 = nn.BatchNorm2d(args.num_channels)
-        self.bn2 = nn.BatchNorm2d(args.num_channels)
-        self.bn3 = nn.BatchNorm2d(args.num_channels)
-        self.bn4 = nn.BatchNorm2d(args.num_channels)
+        self.res_blocks = nn.ModuleList([ResidualBlock(args.num_channels) for _ in range(args.num_res_blocks)])
 
-        self.fc1 = nn.Linear(args.num_channels*(self.board_x-4)*(self.board_y-4), 1024)
-        self.fc_bn1 = nn.BatchNorm1d(1024)
+        # Value Head
+        self.conv_v = nn.Conv2d(args.num_channels, 1, kernel_size=1)  # 1x1 conv
+        self.bn_v = nn.BatchNorm2d(1)
+        self.fc_v1 = nn.Linear(self.board_x * self.board_y, 256)
+        self.fc_v2 = nn.Linear(256, 1)
 
-        self.fc2 = nn.Linear(1024, 512)
-        self.fc_bn2 = nn.BatchNorm1d(512)
-
-        self.fc3 = nn.Linear(512, self.action_size)
-
-        self.fc4 = nn.Linear(512, 1)
+        # Policy Head
+        self.conv_pi = nn.Conv2d(args.num_channels, 2, kernel_size=1)  # 1x1 conv
+        self.bn_pi = nn.BatchNorm2d(2)
+        self.fc_pi = nn.Linear(2 * self.board_x * self.board_y, self.action_size)
 
     def forward(self, s):
-        #                                                           s: batch_size x board_x x board_y
-        s = s.view(-1, 4, self.board_x, self.board_y)                # batch_size x 1 x board_x x board_y
-        s = F.relu(self.bn1(self.conv1(s)))                          # batch_size x num_channels x board_x x board_y
-        s = F.relu(self.bn2(self.conv2(s)))                          # batch_size x num_channels x board_x x board_y
-        s = F.relu(self.bn3(self.conv3(s)))                          # batch_size x num_channels x (board_x-2) x (board_y-2)
-        s = F.relu(self.bn4(self.conv4(s)))                          # batch_size x num_channels x (board_x-4) x (board_y-4)
-        s = s.view(-1, self.args.num_channels*(self.board_x-4)*(self.board_y-4))
+        s = s.view(-1, 4, self.board_x, self.board_y)
+        s = F.relu(self.bn_in(self.conv_in(s)))
 
-        s = F.dropout(F.relu(self.fc_bn1(self.fc1(s))), p=self.args.dropout, training=self.training)  # batch_size x 1024
-        s = F.dropout(F.relu(self.fc_bn2(self.fc2(s))), p=self.args.dropout, training=self.training)  # batch_size x 512
+        for block in self.res_blocks:
+            s = block(s)
 
-        pi = self.fc3(s)                                                                         # batch_size x action_size
-        v = self.fc4(s)                                                                          # batch_size x 1
+        # Value Head
+        v = F.relu(self.bn_v(self.conv_v(s)))
+        v = v.view(-1, self.board_x * self.board_y)
+        v = F.relu(self.fc_v1(v))
+        v = self.fc_v2(v)
 
-        #return F.log_softmax(pi, dim=1), F.tanh(v)
-        return F.log_softmax(pi, dim=1), torch.tanh(v) # new
+        # Policy Head
+        pi = F.relu(self.bn_pi(self.conv_pi(s)))
+        pi = pi.view(-1, 2 * self.board_x * self.board_y)
+        pi = self.fc_pi(pi)
+
+        return F.log_softmax(pi, dim=1), torch.tanh(v)
